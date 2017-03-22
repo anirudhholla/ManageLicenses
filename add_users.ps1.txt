@@ -1,0 +1,237 @@
+
+#Importing  Active Directory
+import-module activedirectory
+
+#loading a dll file from local, ODP.net should be present to run oracle queries on powershell, unblock this dll(by going to properties of that file)
+Add-Type -Path "C:/Users/aholla/Downloads/Setup files/ODP.NET_Managed12.1.0.2.160719/odp.net/managed/common/Oracle.ManagedDataAccess.dll"
+$DateStamp = get-date -uformat "%Y%m%d@%H%M%S"
+$Logfile = "C:\Users\aholla\Downloads\Logs\StaffDB\StaffDB_$DateStamp.log"
+Function LogWrite
+{
+	Param ([string]$logstring)
+	
+	Add-content $Logfile -value $logstring
+}
+
+#Connecting to Oracle DB
+$datasource = "(DESCRIPTION= (ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=us-xxx-ora01)(PORT=1771))) (CONNECT_DATA=(SERVER=DEDICATED)(SID = xxx))); USER ID=xx;PASSWORD=xx;"
+$connectionString = 'Data Source=' + $datasource
+$connection = New-Object Oracle.ManagedDataAccess.Client.OracleConnection($connectionString)
+
+#TEST-comGrpName is a field name having hyphen, using myvar for making it more simple
+$myvar = "-comGrpName"
+
+#initializing hashtables, hash_AD = Hashtable for active directory, hash_DB = Hashtable for database, hash_results = Hashtable to insert to db
+#hash_update = hashtable to update db, #hash_delete = hashtable to delete from db
+$hash_AD = $null
+$hash_DB = $null
+$hash_Results = $null
+$hash_update = $null
+$hash_delete = $null
+
+$hash_AD = @{ }
+$hash_DB = @{ }
+$hash_Results = @{ }
+$hash_update = @{ }
+$hash_delete = @{ }
+
+#opening a database connection, command is for each sql query, command_ad is to fetch from active directory,command_db is to fetch from the database
+#command_insert,update,delete is to insert,update,delete to/from db
+$connection.open()
+$command_AD = $connection.CreateCommand()
+$command_DB = $connection.CreateCommand()
+$command_insert = $connection.CreateCommand()
+$command_update = $connection.CreateCommand()
+$command_delete = $connection.CreateCommand()
+$catch_flag = 0
+
+#fetching values from Active Directory using powershell command
+#$values = Get-AdUser -Filter 'info -like "*Active*" ' -Properties * | select EmployeeID, CN, mail, -comGrpName, employeeType, DistinguishedName | Where-Object { ($_.$myvar -like "Staff") -or ($_.$myvar -like "Contingent Worker" -and $_.employeeType -like "Consultant") -and $_.DistinguishedName -notlike "*Active*" }
+#Add the values from AD to a hashtable(It contains key->employee id, values ->name,mail,type)
+Try
+{
+	$values = Get-AdUser -Filter 'info -like "*Status:Active*" -or info -like "*Status:LOA*" ' -Properties EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, msExchRemoteRecipientType | select EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, UserPrincipalName, info, msExchRemoteRecipientType | Where-Object { $_.CanonicalName -notlike "*Active*" -and $_.employeeType -notlike "Ext Bus Partner" }
+}
+Catch
+{
+	Write-Host "Cannot Fetch from AM domain"
+	LogWrite "Cannot Fetch from AM domain"
+	$catch_flag = 1
+}
+Try
+{
+	$values_eu = Get-AdUser -Filter 'info -like "*Status:Active*" -or info -like "*Status:LOA*"' -Properties EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, msExchRemoteRecipientType -Server "eu.corp..com" | select EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, UserPrincipalName, info, msExchRemoteRecipientType | Where-Object { $_.CanonicalName -notlike "*Active*" -and $_.employeeType -notlike "Ext Bus Partner" }
+}
+Catch
+{
+	Write-Host "Cannot Fetch from EU domain"
+	LogWrite "Cannot Fetch from EU domain"
+	$catch_flag = 1
+}
+Try
+{
+	$values_ap = Get-AdUser -Filter 'info -like "*Status:Active*" -or info -like "*Status:LOA*" ' -Properties EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, msExchRemoteRecipientType -Server "ap.corp..com" | select EmployeeID, CN, mail, -comGrpName, employeeType, CanonicalName, UserPrincipalName, info, msExchRemoteRecipientType | Where-Object { $_.CanonicalName -notlike "*Active*" -and $_.employeeType -notlike "Ext Bus Partner" }
+}
+Catch
+{
+	Write-Host "Cannot Fetch from AP domain"
+	LogWrite "Cannot Fetch from AP domain"
+	$catch_flag = 1
+}
+foreach ($v in $values)
+{
+	$cn = $v.cn
+	$mail = $v.mail
+	$emp_type = $v.employeeType
+	$upn = $v.UserPrincipalName
+	$errt = $v.msExchRemoteRecipientType
+	$hash_AD.Add($v.EmployeeID, @($cn, $mail, $emp_type, $upn, $errt))
+}
+foreach ($v in $values_eu)
+{
+	$cn = $v.cn
+	$mail = $v.mail
+	$emp_type = $v.employeeType
+	$upn = $v.UserPrincipalName
+	$errt = $v.msExchRemoteRecipientType
+	$hash_AD.Add($v.EmployeeID, @($cn, $mail, $emp_type, $upn,$errt))
+}
+foreach ($v in $values_ap)
+{
+	$cn = $v.cn
+	$mail = $v.mail
+	$emp_type = $v.employeeType
+	$upn = $v.UserPrincipalName
+	$errt = $v.msExchRemoteRecipientType
+	$hash_AD.Add($v.EmployeeID, @($cn, $mail, $emp_type, $upn, $errt))
+}
+#Querying the DB to get all the records
+$query_DB = "SELECT * FROM TEST_STAFF"
+$command_DB.CommandText = $query_DB
+$reader_DB = $command_DB.ExecuteReader()
+
+#Storing the data from db to a hashtable
+while ($reader_DB.Read())
+{
+	$emp_id = $reader_DB.GetDecimal(0)
+	$emp_login = $reader_DB.GetString(1)
+	$emp_mail = $reader_DB.GetString(2)
+	$emp_type = $reader_DB.GetString(3)
+	$upn = $reader_DB.GetString(4)
+	if ($reader_DB.IsDBNull(5))
+	{
+		$errt = ""
+	}
+	else
+	{
+		$errt = $reader_DB.GetString(5)
+	}
+	$hash_DB.Add($emp_id.ToString(), @($emp_login, $emp_mail, $emp_type, $upn, $errt))
+}
+
+#result key will have the keys which is not in the DB and those which are present in AD
+$result_key = $hash_AD.Keys | ?{ $hash_DB.Keys -notcontains $_ }
+#update key will have the AD keys which are in DB
+$update_key = $hash_AD.Keys | ?{ $hash_DB.Keys -contains $_ }
+#delete key will have the keys which are present in DB and not in AD
+$delete_key = $hash_DB.Keys | ?{ $hash_AD.Keys -notcontains $_ }
+
+#Insert Result keys to the Hashtable hash_Results
+if ($result_key.Count -gt 0)
+{
+	foreach ($x in $result_key)
+	{
+		$hash_Results.Add($x, @($hash_AD.Item($x)[0], $hash_AD.Item($x)[1], $hash_AD.Item($x)[2], $hash_AD.Item($x)[3], $hash_AD.Item($x)[4]))
+	}
+}
+
+#Insert Update keys to the Hashtable hash_update
+if ($update_key.Count -gt 0)
+{
+	foreach ($x in $update_key)
+	{
+		$hash_update.Add($x, @($hash_AD.Item($x)[0], $hash_AD.Item($x)[1], $hash_AD.Item($x)[2], $hash_AD.Item($x)[3], $hash_AD.Item($x)[4]))
+	}
+}
+
+#Insert delete keys to the Hashtable hash_delete
+if ($delete_key.Count -gt 0 -and $catch_flag -eq 0)
+{
+	foreach ($x in $delete_key)
+	{
+		$hash_delete.Add($x, @($hash_DB.Item($x)[0], $hash_DB.Item($x)[1], $hash_DB.Item($x)[2], $hash_DB.Item($x)[3], $hash_DB.Item($x)[4]))
+	}
+}
+
+#Insert to DB, only the data which is not present in DB
+if ($hash_Results.get_Count() -gt 0)
+{
+	foreach ($key in $($hash_Results.Keys))
+	{
+		$query_insert = "INSERT INTO TEST_STAFF VALUES(" + $key + ",'" + $hash_Results.Item($key)[0] + "','" + $hash_Results.Item($key)[1] + "','" + $hash_Results.Item($key)[2] + "','" + $hash_Results.Item($key)[3] + "','" + $hash_Results.Item($key)[4]+ "')"
+		$command_insert.CommandText = $query_insert
+		$reader = $command_insert.ExecuteReader()
+		$print_log = "Inserted to the DB" + $key
+		LogWrite $print_log
+	}
+}
+
+#Delete from DB,if the data is not present in AD
+if ($hash_delete.get_count() -gt 0)
+{
+	foreach ($key in $($hash_delete.Keys))
+	{
+		$query_delete = "DELETE FROM TEST_STAFF WHERE EMPLOYEE_ID='" + $key + "'"
+		$command_delete.CommandText = $query_delete
+		$reader = $command_delete.ExecuteReader()
+		$print_log = "Deleted from the DB" + $key
+		LogWrite $print_log
+	}
+}
+
+#If data is changed in AD, then modify in the DB
+foreach ($y in $update_key)
+{
+	if ($hash_DB.keys -match $y)
+	{
+		#If there is a mismatch in the login, update it
+		if (!($hash_DB.Item($y)[0] -eq $hash_update.Item($y)[0]))
+		{
+			$query_update = "UPDATE TEST_STAFF SET EMPLOYEE_LOGIN ='" + $hash_update.Item($y)[0] + "' WHERE EMPLOYEE_ID='" + $y + "'"
+			$command_update.CommandText = $query_update
+			$reader_update = $command_update.ExecuteReader()
+			$print_log = "Updated into the DB" + $y + "Field Name changed from :" + $hash_DB.Item($y)[0] + "Field Name changed to :" + $hash_update.Item($y)[0]
+			LogWrite $print_log
+		}
+		
+		#if there is a mismatch in the email,update it
+		if (!($hash_DB.Item($y)[1] -eq $hash_update.Item($y)[1]))
+		{
+			$query_update = "UPDATE TEST_STAFF SET EMPLOYEE_EMAIL ='" + $hash_update.Item($y)[1] + "' WHERE EMPLOYEE_ID='" + $y + "'"
+			$command_update.CommandText = $query_update
+			$reader_update = $command_update.ExecuteReader()
+			$print_log = "Updated into the DB" + $y + "Field Name changed from :" + $hash_DB.Item($y)[1] + "Field Name changed to :" + $hash_update.Item($y)[1]
+			LogWrite $print_log
+		}
+		
+		#if there is a mismatch in the emp type,update it
+		if (!($hash_DB.Item($y)[2] -eq $hash_update.Item($y)[2]))
+		{
+			$query_update = "UPDATE TEST_STAFF SET EMPLOYEE_TYPE ='" + $hash_update.Item($y)[2] + "' WHERE EMPLOYEE_ID='" + $y + "'"
+			$command_update.CommandText = $query_update
+			$reader_update = $command_update.ExecuteReader()
+			$print_log = "Updated into the DB" + $y + "Field Name changed from :" + $hash_DB.Item($y)[2] + "Field Name changed to :" + $hash_update.Item($y)[2]
+			LogWrite $print_log
+		}
+		
+		if (!($hash_DB.Item($y)[4] -eq $hash_update.Item($y)[4]))
+		{
+			$query_update = "UPDATE TEST_STAFF SET EXCHREMOTERECIPIENTTYPE ='" + $hash_update.Item($y)[4] + "' WHERE EMPLOYEE_ID='" + $y + "'"
+			$command_update.CommandText = $query_update
+			$reader_update = $command_update.ExecuteReader()
+			$print_log = "Updated into the DB" + $y + "Field Name changed from :" + $hash_DB.Item($y)[4] + "Field Name changed to :" + $hash_update.Item($y)[4]
+			LogWrite $print_log
+		}
+	}
+}
+$connection.Close()
